@@ -1,0 +1,18 @@
+# audit output — never commit real findings or infra state
+out/
+results/*
+!results/SAMPLE-report.md
+.instance.json
+*.sarif
+*.sarif.json
+report-*.md
+codeql-db/
+
+# python
+__pycache__/
+*.pyc
+.venv/
+venv/
+
+# os
+.DS_Store

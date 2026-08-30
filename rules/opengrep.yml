@@ -1,0 +1,157 @@
+# codebase-specific SAST patterns for the audit. These are the rules
+# the generic scanners miss or rank poorly — Django authz/IDOR shapes, SSRF in
+# user-controlled fetches, React dangerous-HTML, and Terraform open-by-default.
+# OpenGrep is Semgrep-rule-compatible; this is a focused ruleset, not a port of
+# the whole community pack (those ship via opengrep --config auto separately).
+
+rules:
+  # ---- Python / Django ----
+  - id: django-view-without-permission-decorator
+    # views live in views.py, not next to urlpatterns. Scoping to
+    # **/views*.py keeps this from firing on every helper that takes `request`.
+    # Over-fires on unauth'd views that are *meant* to be public — the LLM
+    # triage pass filters those.
+    languages: [python]
+    severity: WARNING
+    message: "Django view defined without @login_required/@permission_required — possible missing authz"
+    paths:
+      include: ["**/views*.py", "**/views/*.py", "**/api/*.py"]
+    patterns:
+      - pattern: |
+          def $FUNC(request, ...):
+            ...
+      - pattern-not-inside: |
+          @login_required
+          def $FUNC(request, ...):
+            ...
+      - pattern-not-inside: |
+          @permission_required(...)
+          def $FUNC(request, ...):
+            ...
+      - pattern-not-inside: |
+          class $CLASS(...):
+            ...
+      - pattern-not-regex: '(?i)^\s*def (login|logout|register|signup|health|ping|webhook|callback)\b'
+    metadata:
+      category: authz
+      cwe: "CWE-862: Missing Authorization"
+
+  - id: django-get-object-or-404-by-user-input-idor
+    languages: [python]
+    severity: ERROR
+    message: "Object fetched by user-controlled id without ownership check — IDOR"
+    patterns:
+      - pattern: $MODEL.objects.get($PK=$USER_INPUT, ...)
+      - pattern-not-inside: |
+          $OBJ = $MODEL.objects.get(...)
+          ...
+          $OBJ.$OWNER == request.user
+      - pattern-not-inside: |
+          $MODEL.objects.filter(user=request.user, ...)
+    metadata:
+      category: idor
+      cwe: "CWE-639: Authorization Bypass Through User-Controlled Key"
+
+  - id: django-debug-true-in-settings
+    languages: [python]
+    severity: ERROR
+    message: "DEBUG = True in settings — disables hardening and leaks stack traces"
+    pattern: DEBUG = True
+    paths:
+      include: ["*settings*.py", "*settings*/*.py"]
+    metadata:
+      category: misconfig
+
+  - id: requests-call-with-user-controlled-url
+    languages: [python]
+    severity: WARNING
+    message: "requests.* called with user-controlled URL — SSRF candidate"
+    patterns:
+      - pattern-either:
+          - pattern: requests.get($URL, ...)
+          - pattern: requests.post($URL, ...)
+          - pattern: requests.request($METHOD, $URL, ...)
+      - pattern-inside: |
+          def $FUNC(request, ...):
+            ...
+            $URL = request.$ANY[...]
+            ...
+    metadata:
+      category: ssrf
+      cwe: "CWE-918: SSRF"
+
+  - id: subprocess-shell-true
+    languages: [python]
+    severity: ERROR
+    message: "subprocess with shell=True — command injection if args are user-derived"
+    pattern: subprocess.$CALL(..., shell=True, ...)
+    metadata:
+      category: injection
+      cwe: "CWE-78"
+
+  # ---- JS / TS / React ----
+  - id: react-dangerouslysetinnerHTML
+    languages: [typescript, javascript]
+    severity: ERROR
+    message: "dangerouslySetInnerHTML — XSS if the source is user input"
+    pattern: '$EL.dangerouslySetInnerHTML = { __html: $X }'
+    metadata:
+      category: xss
+      cwe: "CWE-79"
+
+  - id: eval-user-input
+    languages: [typescript, javascript]
+    severity: ERROR
+    message: "eval() / new Function with possibly-user input — code injection"
+    pattern-either:
+      - pattern: eval($X)
+      - pattern: new Function($X)
+    metadata:
+      category: injection
+      cwe: "CWE-94"
+
+  - id: dom-innerhtml-from-props
+    languages: [typescript, javascript]
+    severity: WARNING
+    message: "innerHTML assigned from props/state — XSS candidate"
+    pattern: $EL.innerHTML = $X
+    metadata:
+      category: xss
+
+  - id: react-default-prop-secret
+    languages: [typescript, javascript]
+    severity: WARNING
+    message: "Hardcoded secret as default prop/const — check it isn't a live credential"
+    pattern-either:
+      - pattern: const $KEY = "sk-..."
+      - pattern: const $KEY = "ghp_..."
+      - pattern: const $KEY = "AKIA..."
+    metadata:
+      category: secret
+
+  # ---- Terraform ----
+  - id: tf-security-group-open-to-world
+    languages: [hcl]
+    severity: ERROR
+    message: "Security group ingress open to 0.0.0.0/0 on a sensitive port"
+    pattern: |
+      ingress {
+        ...
+        cidr_blocks = ["0.0.0.0/0"]
+        ...
+        from_port = $PORT
+      }
+    metadata:
+      category: misconfig
+      cwe: "CWE-284"
+    # this is a heuristic — review the port value; 443 may be fine, 22/3306 not.
+
+  - id: tf-s3-acl-public-read
+    languages: [hcl]
+    severity: ERROR
+    message: "S3 bucket / object ACL set to public-read — data exposure"
+    pattern-either:
+      - pattern: acl = "public-read"
+      - pattern: acl = "public-read-write"
+    metadata:
+      category: exposure
