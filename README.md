@@ -1,4 +1,6 @@
-# Security Audit Pipeline (one-shot, full-codebase)
+# Multi-Scanner Security Audit with LLM Triage
+
+_A one-shot, full-codebase security audit pipeline._
 
 A one-shot security + bug audit that scans an entire codebase (multiple repos),
 runs on a single AWS EC2 instance (not a laptop — CodeQL needs the RAM), and
